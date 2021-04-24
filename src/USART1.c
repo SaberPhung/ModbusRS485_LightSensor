@@ -9,8 +9,11 @@ prints (echoes) transmitted text back to terminal.
 #define HSI_VALUE    ((uint32_t)16000000)
 #include "nucleo152start.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <math.h>
 
+#define SLAVE_ADDRESS 0x0B
+#define INPUT_REGISTER 0x01
 /* Private typedef */
 /* Private define  */
 /* Private macro */
@@ -19,27 +22,22 @@ prints (echoes) transmitted text back to terminal.
 /* Private functions */
 
 void delay_Ms(int delay); 											// DELAY FUNction
-
 void USART1_write(char data);
-void USART2_write(char data);// function to write to terminal
-
+void USART2_write(char data);// function to write to terminal´
 void USART1_Init(void);
 void USART2_Init(void);
-
+void timer11_init(void);
 char USART1_read(void);												// read data
 char USART2_read(void);
-
-int mFlag = 0;														// global state
-
+unsigned short int CRC16(char *nData,unsigned short int wLength);
 void read_7_bytes_from_usartx(char *received_frame);				// Modbus frame received from Master
-
-unsigned short int CRC16 (char *nData,unsigned short int wLength);	// Calculate CRC
-
 int read_sensor(int input_register);								// function to read the values of light sensor
+void return_to_master(int sensor_value);									// function return respond frame
+int mFlag = 0;														// global state
 
 void write_sensor(int M_value);										// function to write the median value
 
-void return_to_master(int M_value);									// function return respond frame
+
 /**
 **===========================================================================
 **
@@ -66,19 +64,11 @@ int main(void)
 	// set up pin PA5 for LED
 	RCC->AHBENR|=1; 				//GPIOA ABH bus clock ON. p154
 	GPIOA->MODER&=~0x00000C00;		//clear (input reset state for PA5). p184
-	GPIOA->MODER|=0x400; 			//GPIOA pin 5 to output. p184
+	GPIOA->MODER|=0x400; 			//GPIOA pin 5 to output. p184	
 
-	GPIOA->ODR^=0x20;				//0010 0000 xor bit 5. p186
-	delay_Ms(1000);
-
-	GPIOA->ODR^=0x20;				//0010 0000 xor bit 5. p186
-	delay_Ms(1000);
-
-	//set up pin PA1 for analog input
-	RCC->AHBENR|=1;				//enable GPIOA clock
-	GPIOA->MODER&=~0x00000C00;		//clear (input reset state for PA5). p184
-	GPIOA->MODER|=0x400; 			//GPIOA pin 5 to output. p184
-	//GPIOA->MODER|=0x3;			//PA0 analog (A0)
+	//set up pin PA0 for analog input
+	RCC->AHBENR|=1;
+	GPIOA->MODER|=0x3;				//PA0 analog (A0)
 
 	//setup ADC1. p272
 	RCC->APB2ENR|=0x00000200;		//enable ADC1 clock
@@ -91,10 +81,10 @@ int main(void)
 
 
 	char frame[8] = {0x0B,0,0,0,0,0,0,0};		// received frame request from Master
-	int crc_check = 0;
+	unsigned short int crc_check = 0;			// 16 bits
 	char crcL=0, crcH = 0;						// Checksum
+	
 	int input_register = 0;						// address of sensor (1 in our case)
-
 	int median[9] = {0,0,0,0,0,0,0,0,0}; 		// values read from sensor
 	int M_value = 0;
 
@@ -104,29 +94,24 @@ int main(void)
   /* Infinite loop */
 	while (1)
 	{
-	   if(mFlag == 1)
+	   if(mFlag == 1)											// correct slave address
 	   {
 		   read_7_bytes_from_usartx(&frame[1]);					// example 0x0b 0x04 0x00 0x01 0x00 0x001
-
+		   frame[0]=SLAVE_ADDRESS;
 		   crc_check = CRC16(frame, 6);							// calculate CRC
 		   crcH = (crc_check >> 8) & 0xff;
 		   crcL = crc_check & 0xff;
-
-		   if(!(crcH == frame[7] && crcL == frame[6]))			// check CRC value
-		   {
-			   mFlag = 0;										// remains idle
-		   }
-		   else
-		   {
-			   input_register = (int)frame[3];					// check the input address
-			   if(input_register == 1)
+		   
+		   
+		   if((crcH == frame[7]) && (crcL == frame[6]))			// check CRC value
+		   {  
+			   if(frame[3]== INPUT_REGISTER)
 			   {
 				   for(int i = 0; i < 9; i++)					// read the sensor 9 times
 				   {
-					   median[i] = read_sensor(input_register);
+					   median[i] = read_sensor(INPUT_REGISTER);
 					   delay_Ms(10);
 				   }
-
 				   int temp = 0;								// take the median value
 				   for(int i = 0; i < 9 - 1; i++)
 				   {
@@ -140,42 +125,40 @@ int main(void)
 						   }
 					   }
 				   }
-				   M_value = median[4];
+					M_value = median[4];
+					//write_sensor(M_value);						// write the median value to terminal
+					return_to_master(M_value);
 
-				   //write_sensor(M_value);						// write the median value to terminal
-
-				   return_to_master(M_value);
-
-				   mFlag = 0;							// reset the idle state
+				   //mFlag = 0;							// reset the idle state
+			   }
+			   else
+			   {
 			   }
 		   }
+		   else
+		   {
+		   }
+		   crc_check = 0;
+		   crcL=0;
+		   crcH = 0;
+		   mFlag=0;
 		   USART1->CR1 |= 0x0020;					//enable RX interrupt
 	   }
 	   else if(mFlag == 2)
 	   {
-
 		   USART1->CR1 &= ~0x00000004;		//RE bit. p739-740. Disable receiver
-
 		   delay_Ms(10); 					//time=1/9600 x 10 bits x 7 byte = 7,29 ms
-
  		   USART1->CR1 |= 0x00000004;		//RE bit. p739-740. Enable receiver
   		   USART1->CR1 |= 0x0020;			//enable RX interrupt
   		   mFlag = 0;
-
 		   	for(int i=0;i<16;i++)
 		   	{
 		   		USART1_write(bufx[i]);
 		   	}
-
-
-	   }
-	   else
-	   {
-		   // sleep mode
-	   }
+		}
+	   
 	}
 	return 0;
-
 }
 
 void delay_Ms(int delay)
@@ -229,26 +212,21 @@ void USART2_write(char data)
 void USART1_IRQHandler(void)
 {
 	char c=0;
-
 	//This bit is set by hardware when the content of the
 	//RDR shift register has been transferred to the USART_DR register.
 	if(USART1->SR & 0x0020) 		//if data available in DR register. p737
 	{
 		c = USART1->DR;				// save read value into c
-
-		if(c==0x0B)					// check slave address
-		{
-			mFlag = 1;
-		}
-		else
-		{
-			mFlag = 2;
-		}
-		// USART CR1 is now 0x0020
-		USART1->CR1 &= ~0x0020; 	// this is to clear bit no.5 of CR1
-			//USART_write('\n');
-			//USART_write('\r');
 	}
+	if(c==SLAVE_ADDRESS)					// check slave address
+	{
+		mFlag = 1;
+	}
+	else
+	{
+		mFlag = 2;
+	}
+	USART1->CR1 &= ~0x0020; 	// this is to clear bit no.5 of CR1
 }
 void USART2_IRQHandler(void)
 {
@@ -260,7 +238,7 @@ void USART2_IRQHandler(void)
 	{
 		c = USART2->DR;				// save read value into c
 
-		if(c==0x0B)					// check slave address
+		if(c==SLAVE_ADDRESS)					// check slave address
 		{
 			mFlag = 1;
 		}
@@ -268,10 +246,7 @@ void USART2_IRQHandler(void)
 		{
 			mFlag = 2;
 		}
-		// USART CR1 is now 0x0020
 		USART2->CR1 &= ~0x0020; 	// this is to clear bit no.5 of CR1
-			//USART_write('\n');
-			//USART_write('\r');
 	}
 }
 char USART1_read()
@@ -294,11 +269,16 @@ char USART2_read()
 
 void read_7_bytes_from_usartx(char *received_frame)
 {
-	for(int i=0; i<7; i++)
-	{
-		*received_frame= USART1_read();
-		received_frame++;
-	}
+	char frame[8]={0};
+	char i=0;
+
+	   while(i<7)
+	   {
+	   *received_frame=USART1_read();
+	   frame[i]=*received_frame;
+	   received_frame++;
+	   i++;
+	   }
 }
 
 unsigned short int CRC16 (char *nData,unsigned short int wLength)
@@ -356,114 +336,48 @@ unsigned short int wCRCWord = 0xFFFF;
 
 int read_sensor(int input_register)
 {
-	int result = 0;
-	//char buf[100];
-
-	ADC1->CR2|=0x40000000;		//start conversion
-
+	int result=0;
+	ADC1->CR2|=0x40000000;	//start conversion
 	while(!(ADC1->SR & 2)){}	//wait for conversion complete
 	result = ADC1->DR;			//read conversion result
 
-	// convert voltage value to ADC value
-
-	/*
-	float voltage = (float)result * 3300 / 4095.0;
-
-	int v_decimal = (int)(roundf(voltage))/1000;
-	int v_degree = (roundf((int)(voltage)%1000));
-	*/
 
 	double lux, x;
 	x = (double)result;
 	lux = 3.0 * 1000000.0 * pow(x, -1.367);
 	int l_decimal = (int)(round(lux));
 
-	if(lux > 500)
-		GPIOA->ODR|=0x20; 	//0010 0000 xor bit 5. p186
-	else
-		GPIOA->ODR&=~0x20; 	//0010 0000 xor bit 5. p186
-
-
-	//sprintf(buf,"Lux: %d\nVoltage: %d.%d V", l_decimal, v_decimal, v_degree);
-	/*sprintf(buf,"Lux: %d", l_decimal);
-	int len=0;
-	while(buf[len]!='\0')
-		len++;
-
-	for(int i=0;i<len;i++)
-	{
-		USART_write(buf[i]);
-	}
-
-	USART_write('\n');
-	USART_write('\r');
-	*/
 	return l_decimal;
 }
-// function to write the value of MEDIAN in REALTERM. WE DONT USE IT
-//void write_sensor(int M_value)
-//{
-//	char buf[100];
-//
-//	sprintf(buf,"Lux: %d", M_value);
-//	int len=0;
-//	while(buf[len]!='\0')
-//		len++;
-//
-//	for(int i=0;i<len;i++)
-//	{
-//		USART1_write(buf[i]);
-//	}
-//
-//	USART1_write('\n');
-//	USART1_write('\r');
-//}
 
-void return_to_master(int M_value)
+
+void return_to_master(int sensor_value)
 {
-	char arr[7] = {0x0b, 0x04, 0x02, 0, 0, 0, 0};
+	GPIOA->ODR|=0x20;				//led on, transmitting mode
+	//example response should be like this: 0104020B057E03
+	char respond_frame[7]={SLAVE_ADDRESS,0x04,0x02,0,0,0,0};
+	char sensor_high_bits=0;
+	char sensor_low_bits=0;
+	char crc_high_byte=0;
+	char crc_low_byte=0;
+	unsigned short int crc=0; //16 bits
 
-//    int temp = M_value;
-//	int rem[4];
-//
-//	for(int i= 0; temp != 0; i++)			// convert from Decimal to Hex
-//	{
-//		rem[i] = temp%16;
-//		temp = temp/16;
-//	}
-//
-//	arr[3] = (char)(rem[3]*10 + rem[2]);		// put into 7-byte frame
-//	arr[4] = (char)(rem[1]*10 + rem[0]);
-//
-//	for(int i=0;i<7;i++)
-//		{
-//			USART_write(arr[i]);
-//		}
-//		//USART_write('\n');
-//		//USART_write(" ");
+	sensor_high_bits=(sensor_value>>8)|sensor_high_bits;
+	sensor_low_bits=sensor_value|sensor_low_bits;
+	respond_frame[3]=sensor_high_bits;
+	respond_frame[4]=sensor_low_bits;
+	crc=CRC16(respond_frame,5);
+	crc_high_byte=(crc>>8)|crc_high_byte; //high byte
+	crc_low_byte=crc|crc_low_byte; //low byte
 
-	int temp = M_value;
+	respond_frame[6]=crc_high_byte;
+	respond_frame[5]=crc_low_byte;
 
-	char low, high;
-
-	low = temp & 0xff;						// convert Lux value from Decimal to Hex
-	high = (temp >> 8) & 0xff;
-
-	arr[3] = high;
-	arr[4] = low;
-
-	int crc_check = 0;
-	crc_check = CRC16(arr, 5);			// calculate checksum
-
-	char crcH = 0, crcL = 0;
-	crcH = (crc_check >> 8) & 0xff;
-	crcL = crc_check & 0xff;
-
-	arr[6] = crcH;
-	arr[5] = crcL;
-
-	for(int i=0;i<7;i++)					// print to Terminal
+	for(int i=0;i<7;i++)
 	{
-		USART1_write(arr[i]);
+		USART1_write(respond_frame[i]);
 	}
+	delay_Ms(100);
+	GPIOA->ODR&=~0x20;				//led off, receiving mode
+	delay_Ms(100);
 }
